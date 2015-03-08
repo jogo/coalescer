@@ -33,6 +33,7 @@ type Coalescer struct {
 	tx       *bolt.Tx
 	handlers chan *handler
 	force    chan bool
+	count    chan bool
 }
 
 // New returns a new transaction Coalescer for a Bolt database.
@@ -53,19 +54,39 @@ func New(db *bolt.DB, limit int, interval time.Duration) (*Coalescer, error) {
 		limit:    limit,
 		interval: interval,
 		handlers: make(chan *handler, limit),
+		force:    make(chan bool),
+		count:    make(chan bool),
 	}
 
 	// Start a separate goroutine to periodically flush the updates.
 	go c.flusher()
+
+	// Start a separate goroutine to track when to send a force.
+	go c.counter()
 
 	return c, nil
 }
 
 // Update executes a function in the context of a write transaction.
 func (c *Coalescer) Update(fn func(tx *bolt.Tx) error) error {
+	c.count <- true
 	h := &handler{fn, make(chan error)}
 	c.handlers <- h
 	return <-h.ch
+}
+
+// Make counter thread safe, by having a single goroutine touch it.
+func (c *Coalescer) counter() {
+	count := 0
+	for {
+		<-c.count
+		count += 1
+		if count >= c.limit {
+			c.force <- true
+			count = 0
+		}
+
+	}
 }
 
 // flusher continually runs in the background and flushes transactions at
